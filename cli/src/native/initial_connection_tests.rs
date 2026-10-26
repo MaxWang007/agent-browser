@@ -3,7 +3,7 @@ use super::*;
 use crate::test_utils::EnvGuard;
 use futures_util::{SinkExt, StreamExt};
 use std::sync::{Arc, Mutex};
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::{error::ProtocolError, Error as WebSocketError, Message};
 
 struct MockBrowser {
     url: String,
@@ -40,8 +40,16 @@ async fn mock_browser_with_event_burst(stall_child: bool, event_burst: usize) ->
     let commands = Arc::new(Mutex::new(Vec::new()));
     let recorded = commands.clone();
     let task = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let mut ws = loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            match tokio_tungstenite::accept_async(stream).await {
+                Ok(ws) => break ws,
+                // CDP attachment can probe the port with a TCP connection
+                // before opening the actual WebSocket, just like real Chrome.
+                Err(WebSocketError::Protocol(ProtocolError::HandshakeIncomplete)) => continue,
+                Err(error) => panic!("Mock browser WebSocket handshake failed: {error}"),
+            }
+        };
         let mut attached = HashSet::new();
         while let Some(Ok(message)) = ws.next().await {
             let Message::Text(text) = message else {
